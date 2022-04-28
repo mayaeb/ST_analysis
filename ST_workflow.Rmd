@@ -1,0 +1,167 @@
+---
+title: "ST_standard_workflow"
+author: "Maya Emmons-Bell"
+date: "4/16/2022"
+output: html_document
+---
+
+Exploring spatial transcriptomics data from Hunter et al., Nat Comm, 2021
+
+Pre-processing data, scoring spots for expression of blastema-like sets of genes, visualizaton. 
+
+load libraries 
+```{r}
+library(Seurat)
+library(SeuratData)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(tidyverse)
+library(BayesSpace)
+```
+
+
+load samples (from Hunter, Monocanda et al., Nat Communications, 2021)
+```{r}
+
+A <- Load10X_Spatial("/Volumes/whitelab/Lab Members/MirandaHunter/Visium_raw_data/MVH01_A1_BRAF_EGFP")
+B <- Load10X_Spatial("/Volumes/whitelab/Lab Members/MirandaHunter/Visium_raw_data/MVH02_B1_BRAF_EGFP")
+C <- Load10X_Spatial("/Volumes/whitelab/Lab Members/MirandaHunter/Visium_raw_data/MVH03_C1_BRAF_EGFP")
+#integrated sample
+ABC <- load("/Volumes/whitelab/Lab Members/MirandaHunter/R_backup/20210922/visium_data_misc/ABC_integrated_allgenes.R")
+
+```
+
+QC visualization - check distribution of counts across tissue
+```{r}
+#first, check number of counts in data, and how count number varies with position in space, and
+#plot count data for each data set 
+A_p1 <- VlnPlot(A, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+A_p2 <- SpatialFeaturePlot(A, features = "nCount_Spatial") + theme(legend.position = "right") + ggtitle("Fish A")
+A_plot <- wrap_plots(A_p1, A_p2)
+
+B_p1 <- VlnPlot(B, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+B_p2 <- SpatialFeaturePlot(B, features = "nCount_Spatial") + theme(legend.position = "right") + ggtitle("Fish B")
+B_plot <- grid.arrange(B_p1, B_p2)
+
+C_p1 <- VlnPlot(C, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+C_p2 <- SpatialFeaturePlot(C, features = "nCount_Spatial") + theme(legend.position = "right") + ggtitle("Fish C")
+C_plot <- grid.arrange(C_p1, C_p2)
+
+plots <- grid.arrange(A_p2, B_p2, C_p2, ncol=3)
+```
+
+Normalization - since RNA count is not evenly distributed across the tissues, normalization methods that force each spot to have the same "size" after normalization don't work. SC transformation builds regularized negative binomial models of gene expression while preserving biological variance, making it a good alternative to Log2Normalization methods. The SCTransform function normalizes data, detects high-variance features, and stores the data in a "SCT" assay 
+```{r}
+A <- SCTransform(A, assay = "Spatial", verbose = FALSE)
+B <- SCTransform(B, assay = "Spatial", verbose = FALSE)
+C <- SCTransform(C, assay = "Spatial", verbose = FALSE)
+```
+
+Linear dim reduction, clustering 
+```{r clustering, fig.height=4, fig.width=8}
+#Fish A
+A <- RunPCA(A, assay = "SCT", verbose = FALSE)
+ElbowPlot(A)
+A <- FindNeighbors(A, reduction = "pca", dims = 1:15)
+#perform clustering with range of resolutions
+A <- FindClusters(A, verbose = FALSE, resolution = c(0.1, 0.3, 0.5, 0.8, 1))
+A <- RunUMAP(A, reduction = "pca", dims = 1:15)
+A_p1 <- DimPlot(A, reduction = "umap", label = TRUE, group.by = "SCT_snn_res.0.5")
+A_p2 <- SpatialDimPlot(A, label = TRUE, label.size = 3, group.by = "SCT_snn_res.0.5")
+A_p1 + A_p2
+
+#Fish B
+B <- RunPCA(B, assay = "SCT", verbose = FALSE)
+ElbowPlot(B)
+B <- FindNeighbors(B, reduction = "pca", dims = 1:15)
+#perform clustering with range of resolutions
+B <- FindClusters(B, verbose = FALSE, resolution = c(0.1, 0.3, 0.5, 0.8, 1))
+B <- RunUMAP(B, reduction = "pca", dims = 1:15)
+B_p1 <- DimPlot(B, reduction = "umap", label = TRUE, group.by = "SCT_snn_res.0.5")
+B_p2 <- SpatialDimPlot(B, label = TRUE, label.size = 3, group.by = "SCT_snn_res.0.5")
+B_p1 + B_p2
+
+#Fish C
+C <- RunPCA(C, assay = "SCT", verbose = FALSE)
+ElbowPlot(C)
+C <- FindNeighbors(C, reduction = "pca", dims = 1:15)
+#perform clustering with range of resolutions
+C <- FindClusters(C, verbose = FALSE, resolution = c(0.1, 0.3, 0.5, 0.8, 1))
+C <- RunUMAP(C, reduction = "pca", dims = 1:15)
+C_p1 <- DimPlot(C, reduction = "umap", label = TRUE, group.by = "SCT_snn_res.0.5")
+C_p2 <- SpatialDimPlot(C, label = TRUE, label.size = 3, group.by = "SCT_snn_res.0.")
+C_p1 + C_p2
+```
+
+Identify spatially variable features 
+There are lots of methods to do this, and real pros and cons to the methods built into Seurat, but I'll stick with them for now. 
+
+SpatiallyVariableFeatures computes the spatial dependence of pairs of spots, only does this for genes that are also variable independent of spatial location. Other methods include SpatialDE. 
+```{r}
+A <- FindSpatiallyVariableFeatures(A, assay = "SCT", features = VariableFeatures(A)[1:1000],
+    selection.method = "markvariogram")
+#visualize
+top.features <- head(SpatiallyVariableFeatures(A, selection.method = "markvariogram"), 6)
+SpatialFeaturePlot(A, features = top.features, ncol = 3, alpha = c(0.1, 1))
+
+```
+
+
+Score spots for blastema gene expression set identified in NMF analysis of regenerating tissue samples 
+```{r}
+#blastema markers are  NMF17 top-scoring genes
+blastema_markers <- c("hmgn2", "si:ch73-281n10.2", "hmgb2a", "hmgb2b", "tubb2b", "hmga1a", "h3f3a", "stmn1a") %>% list(blastema_like= .)
+
+blastema_plot <- SpatialFeaturePlot(A, features = blastema_markers)
+
+for (ii in 1:length(blastema_markers)) {
+  marker_genes <- intersect(blastema_markers[[ii]], rownames(ABC))
+  marker_name <- names(blastema_markers[ii])
+  ABC <- AddModuleScore(ABC, features = list(marker_genes),
+                            name = marker_name)
+}
+
+#add rough tissue types (from Hunter et al., 2021)
+ABC <- RunPCA(ABC, verbose = F)
+ABC <- FindNeighbors(ABC, reduction = "pca", dims = 1:30)
+ABC <- FindClusters(ABC, resolution = 0.8, verbose = F)
+ABC <- RunUMAP(ABC, reduction = "pca", dims = 1:30)
+
+tumor.clust <- c(0,13,10)
+interface.clust <- c(11,9)
+muscle.clust <- c(4,5,6)
+
+Idents(ABC) <- "SCT_snn_res.0.5"
+new.cluster.ids <- c("Tumor", "Unknown", "Unknown", "Unknown", "Muscle", "Muscle",
+    "Muscle", "Unknown", "Unknown", "Interface", "Tumor", "Interface", "Unknown", "Tumor")
+names(new.cluster.ids) <- levels(ABC)
+ABC <- RenameIdents(ABC, new.cluster.ids)
+
+cell_type <- LETTERS[Idents(ABC)]
+names(cell_type) <- colnames(x = ABC)
+ABC <- AddMetaData(
+  object = ABC,
+  metadata = cell_type,
+  col.name = 'cell_type'
+)
+
+ABC@meta.data
+
+
+#visualize where blastema-like cells are in relation to major tissue types
+p1 <- SpatialFeaturePlot(ABC, features = "blastema_like1")
+p2 <- SpatialDimPlot(ABC)
+p1|p2
+#tumor cells are enriched for a blastema-like gene signature
+
+#plot blastema score by tissue type 
+VlnPlot(ABC, features = c("blastema_like1"), split.by = c("cell_type")) +  
+  scale_fill_brewer(palette = "Set2") + 
+  ylab("Blastema-like NMF17 Score") +
+  ggtitle("") +
+  NoLegend()
+
+
+```
+
