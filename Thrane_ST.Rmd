@@ -1,0 +1,129 @@
+---
+title: "Thrane_ST"
+author: "Maya Emmons-Bell"
+date: "5/25/2022"
+output: html_document
+---
+
+Analysis of human melanoma lymph node metastasis ST data set from Thrane et al., using BayesSpace. 
+Assessed the expression of a blastema-like transcriptional module in the tumor/TME. 
+Visualize chain metrics using coda package. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Load libraries 
+```{r libraries}
+library(tidyverse)
+library(BayesSpace)
+library(SingleCellExperiment)
+library(Seurat)
+library(ggplot2)
+library(RColorBrewer)
+library(mebfunctions)
+library(MetBrewer)
+library(tidybayes)
+library(coda)
+```
+
+
+Get human melanoma lymph node met dataset from BayesSpace package 
+```{r load-data}
+melanoma <- getRDS(dataset="2018_thrane_melanoma", sample="ST_mel1_rep2")
+
+```
+
+Data preprocessing 
+```{r preprocessing}
+
+#preprocessing steps:
+#log-normalizes count matrix, performs PCA on top HVGs, adds sequencing metadata   
+set.seed(102)
+melanoma <- spatialPreprocess(melanoma, platform="ST", 
+                              n.PCs=7, n.HVGs=2000, log.normalize=FALSE)
+
+#select the number of clusters to use in analysis by running algorithm with sequence of values for q
+#want to choose q value at elbow of log-likelihood plot
+melanoma <- qTune(melanoma, qs=seq(2, 10), platform="ST", d=7)
+qPlot(melanoma)
+
+```
+
+Clustering
+```{r clustering}
+
+#this takes a while, can decrease nrep from 10,000 iterations to 1,000 for demonstration 
+#but, on my system, 10,000 reps of spatialCluster takes less than 2min
+set.seed(149)
+melanoma <- spatialCluster(melanoma, q=4, platform="ST", d=7,
+                           init.method="mclust", model="t", gamma=2,
+                           nrep=10000, burn.in=100,
+                           save.chain=TRUE)
+clusterPlot(melanoma)
+
+#enhanced clustering adds enhanced PCs and predicted cluster labels at subspot resolution to a new SCE
+#this does take a while with 10,000 reps 
+#set save.chain = TRUE to keep chain for MCMC run as HDF5 file in metadata(sce)$h5.chain
+melanoma.enhanced <- spatialEnhance(melanoma, q=4, platform="ST", d=7,
+                                    model="t", gamma=2,
+                                    jitter_prior=0.3, jitter_scale=3.5,
+                                    nrep=10000, burn.in=100,
+                                    save.chain=TRUE)
+clusterPlot(melanoma.enhanced)
+```
+
+Modeling enhanced gene expression resolution of marker gene sets 
+```{r gene-expression=enhancement}
+
+#BayesSpace takes a list of marker genes, trains model to predict spot-level gene expression, then fitted model predicts subspot expression from subspot enhanced PC vectors
+
+#define marker genes for populations of interest
+#using marker genes from paper for major tumor/tme populations, and top 3 genes from each blastema NMF module for blastema-like marker gens
+markers <- list()
+markers[["Melanoma"]] <- c("PMEL")
+markers[["Fibroblast"]] <- c("COL1A1")
+markers[["B-cell"]] <- c("CD19", "MS4A1")
+markers[["T-cell"]] <- c("CD2", "CD3D", "CD3E", "CD3G", "CD7")
+markers[["Macrophage"]] <- c("CD14", "FCGR1A", "FCGR1B")
+markers[["Blastema-like"]] <- c("MDK", "HMGB2", "DKK3", "KRT18", "HMGN2", "F3", "KRT4", "PDGFRA")
+
+melanoma.enhanced <- enhanceFeatures(melanoma.enhanced, melanoma,
+                                model="xgboost",
+                                feature_names=purrr::reduce(markers, c),
+                                nrounds=0)
+
+```
+
+Plot data
+```{r plotting}
+
+sum_counts <- function(sce, features) {
+  if (length(features) > 1) {
+    colSums(logcounts(sce)[features, ])
+  } else {
+    logcounts(sce)[features, ]
+  }
+}
+
+melanoma_enhanced_expr <- colSums(logcounts(melanoma.enhanced)["PMEL",])
+
+#plot spot-level expression
+spot_expr <- purrr::map(markers, function(xs) sum_counts(melanoma, xs))
+
+#plot modeled subspot level expression
+enhanced_expr <- purrr::map(markers, function(xs) sum_counts(melanoma.enhanced, xs))
+```
+
+Explore some model metrics
+```{r model-metrics}
+#extract chain from melanoma object
+chain <- mcmcChain(melanoma)
+chain[1:5, 1:5]
+
+#visualize MCMC traces and densities 
+plot(chain)
+
+```
+
